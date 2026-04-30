@@ -5,3 +5,4 @@ CLAUDE.local.md
 .env
 .env.*
 .DS_Store
+__pycache__/
