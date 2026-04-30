@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ BNS = "http://api.platform.boomi.com/"
 NS = {"bns": BNS}
 
 # Layout spacing
-H_SPACING = 192.0        # horizontal gap between sequential shapes
+H_SPACING = 224.0        # horizontal gap between sequential shapes (225 is recommended)
 V_SPACING = 160.0        # vertical gap between main branches
 V_SUB_SPACING = 112.0    # vertical offset for sub-branches
 START_X = 48.0
@@ -280,23 +280,28 @@ def compute_layout(shapes: dict[str, Shape]) -> dict[str, tuple[float, float]]:
     layers: dict[str, int] = {}
     queue = deque([start.name])
     layers[start.name] = 0
+    
+    # Processed counter to detect infinite loops on malformed cycles
+    processed_count = 0
+    max_safe_iter = len(shapes) * 2
 
-    while queue:
+    while queue and processed_count < max_safe_iter:
         current = queue.popleft()
+        processed_count += 1
         current_layer = layers[current]
         for target in adjacency.get(current, []):
             new_layer = current_layer + 1
             # If target already has a layer, take the max (merge point)
             if target in layers:
-                layers[target] = max(layers[target], new_layer)
-                # Re-process downstream of merge points
-                queue.append(target)
+                if new_layer > layers[target]:
+                    layers[target] = new_layer
+                    # Re-process downstream of merge points
+                    queue.append(target)
             else:
                 layers[target] = new_layer
                 queue.append(target)
 
     # Assign layer 0 to any unreached shapes (orphans)
-    max_existing_layer = max(layers.values()) if layers else 0
     # Find reachable shapes from start via BFS
     reachable_set = set()
     rq = deque([start.name])
@@ -319,53 +324,58 @@ def compute_layout(shapes: dict[str, Shape]) -> dict[str, tuple[float, float]]:
     tracks: dict[str, int] = {}  # shape_name → track index
     track_depth: dict[int, float] = {}  # track → accumulated height needed
 
-    def assign_tracks(shape_name: str, track: int, depth: float):
+    def assign_tracks(shape_name: str, track: int, depth: float, visited_path: Set[str]):
         """DFS to assign tracks, branching at decision/route shapes."""
+        if shape_name in visited_path:
+            return # Cycle protection
+            
         if shape_name in tracks:
             return  # Already assigned (merge point)
+            
         tracks[shape_name] = track
         track_depth[track] = max(track_depth.get(track, 0), depth)
 
         shape = shapes[shape_name]
         targets = adjacency.get(shape_name, [])
 
+        # Create new path set for this branch
+        new_path = visited_path | {shape_name}
+
         if len(targets) <= 1:
             # Single output — continue on same track
             for t in targets:
-                assign_tracks(t, track, depth)
+                assign_tracks(t, track, depth, new_path)
         else:
             # Multiple outputs (branch) — assign sub-tracks
             # First target stays on current track (main path)
             # Additional targets get new tracks below
-            next_track = max(track_depth.keys(), default=0) + 1
+            next_track_base = max(track_depth.keys(), default=0) + 1
             for i, target in enumerate(targets):
                 if i == 0:
                     # Main path continues on same track
-                    assign_tracks(target, track, depth)
+                    assign_tracks(target, track, depth, new_path)
                 else:
                     # Branch — new track
+                    branch_track = next_track_base + i - 1
                     branch_depth = depth + (i * V_SPACING)
-                    assign_tracks(target, next_track + i - 1, branch_depth)
+                    assign_tracks(target, branch_track, branch_depth, new_path)
 
-    assign_tracks(start.name, 0, 0.0)
+    assign_tracks(start.name, 0, 0.0, set())
 
     # ── Step 3: Compute final x,y coordinates ──
     positions: dict[str, tuple[float, float]] = {}
-    max_layer = max(layers.values()) if layers else 0
 
     # Sort shapes by layer for deterministic output
     sorted_shapes = sorted(shapes.keys(), key=lambda n: (layers[n], tracks.get(n, 0), n))
 
     # Track y-offsets
     track_y: dict[int, float] = {}
-    current_track_base = START_Y
-
-    # Assign y positions per track
     unique_tracks = sorted(set(tracks.values()))
     for i, track_id in enumerate(unique_tracks):
         if i == 0:
             track_y[track_id] = START_Y
         else:
+            # Check previous track depth to avoid overlaps if tracks are uneven
             track_y[track_id] = START_Y + (i * V_SPACING)
 
     for name in sorted_shapes:
@@ -378,29 +388,37 @@ def compute_layout(shapes: dict[str, Shape]) -> dict[str, tuple[float, float]]:
     # ── Step 4: Place orphaned shapes below main flow ──
     if orphan_shapes:
         max_main_y = max((y for _, (_, y) in positions.items()), default=START_Y)
-        orphan_y = max_main_y + V_SPACING  # below everything
+        orphan_y_start = max_main_y + V_SPACING * 1.5
         for i, name in enumerate(orphan_shapes):
-            positions[name] = (START_X + (i * H_SPACING), orphan_y)
+            row = i // 5
+            col = i % 5
+            positions[name] = (START_X + (col * H_SPACING), orphan_y_start + (row * V_SPACING))
 
     # ── Step 5: Adjust merge points ──
     # Merge points (shapes with multiple inbound paths) should be positioned
-    # toward the shorter branches
+    # between their sources if possible
     for name, shape in shapes.items():
         sources = reverse_adj.get(name, [])
         if len(sources) > 1:
             # This is a merge point — find the tracks of its sources
-            source_tracks = [tracks.get(s, 0) for s in sources]
-            if len(set(source_tracks)) > 1:
-                # Position y between the lower tracks (toward shorter branches)
-                source_y_values = [positions.get(s, (0, START_Y))[1] for s in sources]
-                # Use median of source y values, biased toward shorter branches
-                source_y_values.sort()
-                mid_idx = len(source_y_values) // 2
-                merge_y = source_y_values[mid_idx]
-                # Push x right of all sources
-                max_source_x = max(positions.get(s, (0, 0))[0] for s in sources)
-                merge_x = max_source_x + H_SPACING
-                positions[name] = (merge_x, merge_y)
+            source_y_values = [positions.get(s, (0, START_Y))[1] for s in sources]
+            source_y_values.sort()
+            
+            # Position at the vertical midpoint of sources
+            mid_y = sum(source_y_values) / len(source_y_values)
+            
+            # Snap to 8-unit grid (Boomi preference)
+            mid_y = round(mid_y / 8) * 8
+            
+            # Push x right of ALL sources
+            max_source_x = max(positions.get(s, (0, 0))[0] for s in sources)
+            merge_x = max_source_x + H_SPACING
+            
+            # Update layer if we pushed it significantly
+            new_layer = int((merge_x - START_X) / H_SPACING)
+            layers[name] = max(layers[name], new_layer)
+            
+            positions[name] = (merge_x, mid_y)
 
     return positions
 
@@ -408,15 +426,35 @@ def compute_layout(shapes: dict[str, Shape]) -> dict[str, tuple[float, float]]:
 # ── Apply Changes ────────────────────────────────────────────────────────────
 
 def apply_positions(shapes: dict[str, Shape], positions: dict[str, tuple[float, float]]):
-    """Update shape x/y attributes in the XML. Dragpoint positions left unchanged."""
+    """Update shape x/y attributes in the XML. Also updates dragpoint positions."""
     for name, (x, y) in positions.items():
         shape = shapes.get(name)
         if not shape or not shape.element:
             continue
 
-        # Update shape position only — dragpoints keep their relative offsets
         shape.element.set("x", f"{x:.1f}")
         shape.element.set("y", f"{y:.1f}")
+
+        # Update dragpoint positions to follow the shape
+        # Standard Boomi layout places dragpoints on the right edge
+        for dp in shape.dragpoints:
+            if dp.element is not None:
+                # Base offset for standard shapes
+                dp_x = x + DP_OFFSET_X
+                dp_y = y + DP_OFFSET_Y
+                
+                # If there are multiple dragpoints (Decision/Route), offset them vertically
+                if len(shape.dragpoints) > 1:
+                    try:
+                        # Identifiers are usually '1', '2', etc.
+                        # We spread them by 24 units vertically
+                        idx = int(dp.identifier) - 1 if dp.identifier.isdigit() else 0
+                        dp_y += (idx * 24.0)
+                    except:
+                        pass
+                
+                dp.element.set("x", f"{dp_x:.1f}")
+                dp.element.set("y", f"{dp_y:.1f}")
 
 
 # ── Report ───────────────────────────────────────────────────────────────────
@@ -460,9 +498,10 @@ def print_report(issues: list[IntegrityIssue], shapes: dict[str, Shape],
         else:
             print(f"\n📐 Layout: already clean, no changes needed")
 
-        # Show final positions
+        # Show final positions (sorted by coordinates for readable list)
         print("\n   Shape positions:")
-        for name in sorted(positions.keys()):
+        pos_list = sorted(positions.keys(), key=lambda n: (positions[n][1], positions[n][0]))
+        for name in pos_list:
             x, y = positions[name]
             shape = shapes[name]
             label = f" ({shape.userlabel})" if shape.userlabel else ""
@@ -470,7 +509,7 @@ def print_report(issues: list[IntegrityIssue], shapes: dict[str, Shape],
             old_x, old_y = shape.x, shape.y
             if abs(old_x - x) > 1 or abs(old_y - y) > 1:
                 marker = " ← moved"
-            print(f"   {name:20s} [{shape.shapetype:18s}] x={x:7.1f} y={y:7.1f}{label}{marker}")
+            print(f"   {name:15s} [{shape.shapetype:14s}] x={x:7.1f} y={y:7.1f}{label}{marker}")
 
     print("\n" + "=" * 60)
 
@@ -517,6 +556,9 @@ def main():
     if not dry_run:
         if positions:
             apply_positions(shapes, positions)
+        
+        # Write back
+        # Note: xml_declaration=True and encoding="UTF-8" are important for Boomi
         tree.write(filepath, xml_declaration=True, encoding="UTF-8")
         print(f"\n💾 Updated: {filepath}")
     else:
