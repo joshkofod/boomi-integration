@@ -5,7 +5,7 @@
 > ### What's different from upstream
 >
 > - **`GEMINI.md`** added alongside `CLAUDE.md` — both agents are now supported out of the box
-> - **`AGENTS.md`** added — the emerging cross-platform standard, natively loaded by OpenCode, and also read by Claude Code and Gemini CLI
+> - **`AGENTS.md`** added — the emerging cross-platform standard, natively loaded by OpenCode and OpenAI Codex, and also read by Claude Code and Gemini CLI
 > - **Claude-specific references removed** from `SKILL.md` — path examples, slash command references, and folder names are now agent-agnostic
 > - **Standalone canvas arranger** (`scripts/boomi-canvas-arrange.py`) — replaces the Claude Code agent with a portable Python script that works with any agent. Validates step-path integrity (orphans, broken connections, unset dragpoints) and arranges shape layout for clean visual presentation in the Boomi GUI
 > - **Canvas arranger wired into SKILL.md** — agents are instructed to run it automatically after building or modifying processes
