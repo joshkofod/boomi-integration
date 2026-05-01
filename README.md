@@ -1,6 +1,6 @@
 # boomi-integration Skill (Gemini CLI Fork)
 
-> **This is an unofficial community fork of OfficialBoomi/boomi-integration, tuned for use with Google Gemini CLI and other non-Claude agents. It is not affiliated with or endorsed by Boomi, LP.
+> **This is an unofficial community fork** of [OfficialBoomi/boomi-integration](https://github.com/OfficialBoomi/boomi-integration), tuned for use with **Google Gemini CLI** and other non-Claude agents. It is not affiliated with or endorsed by Boomi, LP.
 >
 > ### What's different from upstream
 >
